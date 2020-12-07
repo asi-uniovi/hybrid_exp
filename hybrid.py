@@ -162,7 +162,8 @@ def solve_problem(perf_factor, instance_names, n_apps,
                     price=priv_cost,
                     max_vms=private_vms_count,
                     is_reserved=True,
-                    time_unit="h"))
+                    time_unit="h",
+                    cores=2))
 
     # Previously bought private instances
     if priv_prev_n > 0:
@@ -171,7 +172,8 @@ def solve_problem(perf_factor, instance_names, n_apps,
                         price=0.000001, # Insignificant
                         max_vms=priv_prev_n,
                         is_reserved=True,
-                        time_unit="h"))
+                        time_unit="h",
+                        cores=2))
 
     # Apps
     apps = [malloovia.App(f'a{i}', name=f'{i}') for i in range(n_apps)]
