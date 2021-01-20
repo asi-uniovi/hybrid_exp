@@ -1,104 +1,79 @@
-'''Using Malloovia, generates the optimal solution of different scenarios in a
-hybrid cloud. Then it simulates them with simlloovia.
+'''Create rph from rps using different resampling methods, use malloovia to find
+the optimal allocation for each case and simulate it with simlloovia.
 
-The file hybrid.py with different parameters is used for generating the
-Malloovia solutions, which are saved in the directory "sol" as pickle files. A
-summary in CSV format is saved in directory "res_malloovia".
+This script produces new "scenarios" numbered from 10 onwards. Each scenario
+generates a workload in rph using a different method (stored in
+workloads/hours<N_SCENARIO>) and uses malloovia to solve it, which generates
+pickle solutions in "sols/<N_SCENARIO>_sol.p" and solution summaries in
+"res_malloovia/<N_SCENARIO>_sol.csv". Then it uses Simlloovia to simulate it
+and leaves the results in "res_sim/<N_SCENARIO>".
 
-Simlloovia leaves the results in directory "res_sim".
+These are the generated scenarios:
+
+* 10: The rph are computed as 3600 times the rps with percentile 0.9 within the
+  hour
+* 11: The rph are computed as 3600 times the rps with percentile 0.95 within the
+  hour
+* 12: The rph are computed as 3600 times the rps with percentile 0.99 within the
+  hour
+* 12: The rph are computed as 3600 times the rps with percentile 1.0 within the
+  hour, i.e., the maximum number of requests seing in the hour
 '''
-import pandas as pd
 
-HOURS_TO_SIMULATE=168
-
-SCENARIOS = {
-    '001': {
-        'priv_new': 100,
-        'priv_prev': 0,
-    },
-    '002': {
-        'priv_new': 25,
-        'priv_prev': 0,
-    },
-    '003': {
-        'priv_new': 100,
-        'priv_prev': 10,
-    },
-    '004': {
-        'priv_new': 15,
-        'priv_prev': 10,
-    }
-}
+apps = range(4)
+percentiles = [.9, .95, .99, 1]
+first_sol = 10
+sols = range(first_sol, first_sol+len(percentiles))
+HOURS_TO_SIMULATE = 168
 
 WORKLOADS = [
-    'smooth', 'uniform'
+    'smooth'
 ]
 
 rule all:
-    input:
-        'res_malloovia/summary.csv',
-        'res_sim/summary.csv'
+    input: expand("res_sim/0{sol}.csv", sol=sols)
 
-rule summarize_simulations:
-    input:
-        expand('res_sim/{exp}_{workload}.csv', exp=SCENARIOS.keys(), workload=WORKLOADS),
-        expand('res_sim/{exp}_{workload}_out.txt', exp=SCENARIOS.keys(), workload=WORKLOADS),
-    output:
-        'res_sim/summary.csv'
-    run:
-        dfs = [pd.read_csv(f, names=['param', f], header=0).set_index('param') for f in input if f[-4:] == '.csv']
-        df = pd.concat(dfs, axis=1).T
-        df.to_csv(output[0])
+rule create_one_rph_file:
+    input: 'workloads/sec_smooth/wl{app}.csv'
+    output: 'workloads/hours{sol}/wl{app}.csv'
+    params:
+        percentile = lambda wildcards: percentiles[int(wildcards.sol)-first_sol]
 
-rule simulate_exp:
-    input:
-        'sols/{exp}_sol.p',
-        expand('workloads/sec_{workload}/wl{app}.csv', workload=WORKLOADS, app=range(4))
-    output:
-        'res_sim/{exp}_{workload}.csv',
-        'res_sim/{exp}_{workload}_out.txt',
     shell:
-        'simlloovia --sol-file=sols/{wildcards.exp}_sol.p'\
-        ' --workload=workloads/sec_{wildcards.workload}/wl'\
-        ' --workload-period=1'\
-        ' --output-prefix={wildcards.exp}_{wildcards.workload} --output-dir=res_sim'\
-        f' --workload-length={HOURS_TO_SIMULATE*3600}'\
-        ' --save-evs=true'\
-        ' --save-utils=true'
+        'python  resample_load.py {input} {output} --percentile={params.percentile}'
 
-rule summarize_experiments_malloovia:
-    input:
-        expand('res_malloovia/{n_exp}_sol.csv', n_exp=SCENARIOS.keys())
-    output:
-        'res_malloovia/summary.csv'
-    run:
-        dfs = [pd.read_csv(f) for f in input]
-        df = pd.concat(dfs)
-        df.to_csv(output[0])
-
-rule one_experiment_malloovia:
-    input:
+rule create_malloovia_solution:
+    input: 
         'hybrid.py',
-        expand('workloads/hours/wl{app}.csv', app=range(4)),
+        expand('workloads/hours{{sol}}/wl{app}.csv', app=range(4)),
         'amazon_s3_data.csv',
         'amazon_ec2_data.csv'
     output:
-         'res_malloovia/{n_exp}_sol.csv',
-         'sols/{n_exp}_sol.p',
-    params:
-        priv_n = lambda wildcards: SCENARIOS[wildcards.n_exp]['priv_new'],
-        priv_prev_n = lambda wildcards: SCENARIOS[wildcards.n_exp]['priv_prev']
+        'res_malloovia/0{sol}_sol.csv',
+        "sols/0{sol}_sol.p"
     shell:
-        'python hybrid.py --n-apps=4 '\
-            '--first-app=0 '\
-            '--perf-factor=1 '\
-            '--quant-factor=1 '\
-            '--output-prefix="sol" '\
-            '--priv-n={params.priv_n} '\
-            '--priv-prev-n={params.priv_prev_n} '\
-            '--priv-ecus=10 '\
-            '--priv-cost=0.01 '\
-            '--exp-n={wildcards.n_exp}'
+        '''
+        python hybrid.py --n-apps=4 --first-app=0 --perf-factor=1 --quant-factor=1 \
+        --output-prefix=sol --max_priv_new=15 --priv-prev-n=10 --priv-prev-ecus=10 \
+        --priv-new-ecus=20 --priv-new-cost=0.01 --exp-n={wildcards.sol} \
+        --workload-dir=workloads/hours{wildcards.sol}
+        '''
+
+rule simulate_scenario:
+    input:
+        'sols/01{exp}_sol.p',
+        expand('workloads/sec_smooth/wl{app}.csv', app=apps)
+    output:
+        'res_sim/01{exp}.csv',
+        'res_sim/01{exp}_out.txt',
+    shell:
+        'simlloovia --sol-file=sols/01{wildcards.exp}_sol.p'\
+        ' --workload=workloads/sec_smooth/wl'\
+        ' --workload-period=1'\
+        ' --output-prefix=01{wildcards.exp} --output-dir=res_sim'\
+        f' --workload-length={HOURS_TO_SIMULATE*3600}'\
+        ' --save-evs=true'\
+        ' --save-utils=true'
 
 rule unzip_input_files:
     input:
@@ -116,7 +91,3 @@ rule unzip_input_files:
         gunzip amazon_ec2_data.csv.gz
         gunzip amazon_s3_data.csv.gz
         '''
-
-rule clean:
-    shell:
-        '''rm -rf res_malloovia/* res_sim/* sols/*'''
