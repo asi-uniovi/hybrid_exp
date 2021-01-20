@@ -59,7 +59,8 @@ def get_perfs(
     apps: List[malloovia.App],
     perf_factor: int,
     perfs_per_ecu: List[int],
-    priv_ecus: int,
+    priv_prev_ecus: int,
+    priv_new_ecus: int,
     ) -> malloovia.PerformanceSet:
 
     perf_dict = {}
@@ -67,7 +68,13 @@ def get_perfs(
         try:
             ecus = int(amazon_ec2_data[amazon_ec2_data.Type == ic.name]['ECU'].iloc[0])
         except:
-            ecus = priv_ecus
+            if ic.name == 'priv_prev':
+                ecus = priv_prev_ecus
+            elif ic.name == 'priv':
+                ecus = priv_new_ecus
+            else:
+                raise Exception('Unrecognized instance type in get_perfs')
+
         perf_dict[ic] = {
             app: perf * ecus * perf_factor
             for app, perf in zip(apps, perfs_per_ecu)
@@ -141,9 +148,9 @@ def reordered_list(l, first_element):
     return l[first_element:] + l[:first_element]
 
 def solve_problem(perf_factor, instance_names, n_apps,
-                  first_app, quant_factor, exp_n, priv_n, priv_prev_n,
-                  priv_ecus, priv_cost, region_names=None,
-                  verbose=False):
+                  first_app, quant_factor, exp_n, max_priv_new, priv_prev_n,
+                  priv_prev_ecus, priv_new_ecus, priv_new_cost,
+                  region_names=None, verbose=False, workload_dir="hours"):
 
     amazon_s3_data = cloud_providers.read_amazon_s3_data('amazon_s3_data.csv')
     amazon_ec2_data = cloud_providers.read_amazon_ec2_data('amazon_ec2_data.csv')
@@ -156,12 +163,12 @@ def solve_problem(perf_factor, instance_names, n_apps,
         instance_names, region_names)
 
     # Add instance classes for the private cloud
-    private_vms_count = priv_n
     ics.append(malloovia.InstanceClass(id=f'priv', name='priv',
                     limiting_sets=(),
-                    price=priv_cost,
-                    max_vms=private_vms_count,
+                    price=priv_new_cost,
+                    max_vms=max_priv_new,
                     is_reserved=True,
+                    is_private=True,
                     time_unit="h",
                     cores=2))
 
@@ -172,6 +179,7 @@ def solve_problem(perf_factor, instance_names, n_apps,
                         price=0.000001, # Insignificant
                         max_vms=priv_prev_n,
                         is_reserved=True,
+                        is_private=True,
                         time_unit="h",
                         cores=2))
 
@@ -185,7 +193,7 @@ def solve_problem(perf_factor, instance_names, n_apps,
     perfs_per_ecu = [1000, 500, 2000, 300]*factor_repeat # Performance for a machine with 1 ECU
     perfs_per_ecu = reordered_list(perfs_per_ecu, first_app)
     perfs = get_perfs(amazon_ec2_data, ics, apps, perf_factor, perfs_per_ecu,
-                priv_ecus)
+                 priv_prev_ecus, priv_new_ecus)
 
     perf_list = []
     for a in apps:
@@ -197,7 +205,7 @@ def solve_problem(perf_factor, instance_names, n_apps,
     # Workloads
     wls = []
     for i in range(N_AVAILABLE_WLS):
-        with open(f'workloads/hours/wl{i}.csv') as f:
+        with open(f'{workload_dir}/wl{i}.csv') as f:
             reader = csv.reader(f)
             for row in reader:
                 wls.append(tuple(int(x) for x in row))
@@ -235,7 +243,7 @@ def solve_problem(perf_factor, instance_names, n_apps,
 
     print('Solving', datetime.now().strftime("%H:%M:%S"))
     phase_i = malloovia.PhaseI(problem)
-    solver = pulp.COIN(maxSeconds=2200*60, msg=1, fracGap=0.05, threads=8)
+    solver = pulp.COIN(maxSeconds=2200*60, msg=1, fracGap=0, threads=8)
     phase_i_solution = phase_i.solve(solver=solver)
 
     filename = f'sols/{exp_n:03}_sol.p'
@@ -268,13 +276,16 @@ def solve_problem(perf_factor, instance_names, n_apps,
 @click.option('--perf-factor', help='Performance factor', required=True, type=click.INT)
 @click.option('--quant-factor', help='Quantization factor', required=True, type=click.INT)
 @click.option('--output-prefix', help='Prefix to the output csv file name', required=True, type=click.STRING)
-@click.option('--priv-n', help='Number of VMs in the private cloud', required=True, type=click.INT)
+@click.option('--max_priv_new', help='Maximum number of new VMs in the private cloud', required=True, type=click.INT)
 @click.option('--priv-prev-n', help='Number of VMs in the private cloud already bought', required=False, type=click.INT, default=0)
-@click.option('--priv-ecus', help='ECS of VMs in the private cloud', required=True, type=click.INT)
-@click.option('--priv-cost', help='Dolars per hour of VMs in the private cloud', required=True, type=click.FLOAT)
+@click.option('--priv-prev-ecus', help='ECUs of previously existing VMs in the private cloud', required=True, type=click.INT)
+@click.option('--priv-new-ecus', help='ECUs of new VMs in the private cloud', required=True, type=click.INT)
+@click.option('--priv-new-cost', help='Dolars per hour of VMs in the private cloud', required=True, type=click.FLOAT)
 @click.option('--exp-n', help='Number of the experiment used as prefix in files', required=True, type=click.INT)
-def main(n_apps, first_app, perf_factor, quant_factor, output_prefix, priv_n,
-        priv_prev_n, priv_ecus, priv_cost, exp_n):
+@click.option('--workload-dir', help="Name of the folder with the app workloads", required=False, type=click.STRING, default="workloads/hours", show_default=True)
+def main(n_apps, first_app, perf_factor, quant_factor, output_prefix,
+        max_priv_new, priv_prev_n, priv_prev_ecus, priv_new_ecus, priv_new_cost,
+        exp_n, workload_dir):
     # Uncomment to save data
     # cloud_providers.save_amazon_ec2_data()
     # cloud_providers.save_amazon_s3_data()
@@ -282,9 +293,11 @@ def main(n_apps, first_app, perf_factor, quant_factor, output_prefix, priv_n,
     instance_names = ['c5.large', 'c5.xlarge', 'c5.2xlarge', 'c5.4xlarge']
     print(f'Exp {exp_n:03} Solving for {n_apps} apps first_app {first_app}'
           f' perf_factor: {perf_factor}'
-          f' quant factor: {quant_factor} instances: {len(instance_names)}'
-          f' priv instances: {priv_n} priv_ecus: {priv_ecus}'
-          f' priv_cost: {priv_cost}')
+          f' quant factor: {quant_factor}\n'
+          f'pub instance classes: {len(instance_names)}'
+          f' max_priv_new: {max_priv_new} priv_prev_n: {priv_prev_n}\n'
+          f'priv_new_ecus: {priv_new_ecus}'
+          f' priv_prev_ecus: {priv_prev_ecus} priv_new_cost: {priv_new_cost}')
 
     # Use only two regions
     region_names = ['EU (Ireland)', 'EU (London)']
@@ -297,19 +310,21 @@ def main(n_apps, first_app, perf_factor, quant_factor, output_prefix, priv_n,
                             first_app=first_app,
                             quant_factor=quant_factor,
                             exp_n=exp_n,
-                            priv_n=priv_n,
+                            max_priv_new=max_priv_new,
                             priv_prev_n=priv_prev_n,
-                            priv_ecus=priv_ecus,
-                            priv_cost=priv_cost,
+                            priv_prev_ecus=priv_prev_ecus,
+                            priv_new_ecus=priv_new_ecus,
+                            priv_new_cost=priv_new_cost,
                             region_names=region_names,
-                            verbose=True)
+                            verbose=True,
+                            workload_dir=workload_dir)
     results.append([exp_n, n_apps, perf_factor, first_app, quant_factor,
-                priv_n, priv_ecus, priv_cost,
+                max_priv_new, priv_prev_ecus, priv_new_ecus, priv_new_cost,
                 *exp_result])
 
     df = pd.DataFrame(results)
     df.columns = ["exp", "n_apps", "perf_factor", "first_app", "quant_factor",
-                "priv_n", "priv_ecus", "priv_cost",
+                "priv_n", "priv_prev_ecus", "priv_new_ecus", "priv_cost",
                 *ExpResult._fields]
 
     print(df)
