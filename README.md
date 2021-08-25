@@ -17,7 +17,7 @@ pip install -r requirements.txt
 2. Clean output files with:
 
 ```shell
-    snakemake clean
+    snakemake clean -c1
 ```
 
 3. Execute the experiments with:

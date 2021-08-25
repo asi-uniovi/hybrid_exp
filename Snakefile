@@ -91,3 +91,7 @@ rule unzip_input_files:
         gunzip amazon_ec2_data.csv.gz
         gunzip amazon_s3_data.csv.gz
         '''
+
+rule clean:
+    shell:
+        '''rm -rf res_malloovia/* res_sim/* sols/*'''
